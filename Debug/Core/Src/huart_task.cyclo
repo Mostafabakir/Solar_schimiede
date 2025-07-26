@@ -1,0 +1,2 @@
+../Core/Src/huart_task.c:28:6:HAL_UART_RxCpltCallback	11
+../Core/Src/huart_task.c:65:6:huartTaskEntry	5

@@ -1,0 +1,10 @@
+../Core/Src/bus_node.c:33:17:getWaitTime	1
+../Core/Src/bus_node.c:37:13:handleADCDataRequest	2
+../Core/Src/bus_node.c:69:13:handleExternalADCDataRequest	1
+../Core/Src/bus_node.c:98:13:handleSayHiRequest	1
+../Core/Src/bus_node.c:130:13:handleUARTDataRequest	3
+../Core/Src/bus_node.c:164:13:detect_downstream	6
+../Core/Src/bus_node.c:238:6:BusNode_Init	1
+../Core/Src/bus_node.c:246:13:forward_packet	3
+../Core/Src/bus_node.c:294:6:HAL_SPI_RxCpltCallback	2
+../Core/Src/bus_node.c:303:6:BusNode_RunLoop	24

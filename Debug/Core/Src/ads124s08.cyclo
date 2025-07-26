@@ -1,0 +1,8 @@
+../Core/Src/ads124s08.c:16:6:ADS124S08_Init	1
+../Core/Src/ads124s08.c:54:6:ADS124S08_Reset	1
+../Core/Src/ads124s08.c:69:6:ADS124S08_StartConversion	1
+../Core/Src/ads124s08.c:83:6:ADS124S08_StopConversion	1
+../Core/Src/ads124s08.c:98:9:ADS124S08_ReadRegister	2
+../Core/Src/ads124s08.c:122:6:ADS124S08_WriteRegister	2
+../Core/Src/ads124s08.c:143:6:ADS124S08_SetInputChannel	3
+../Core/Src/ads124s08.c:166:10:ADS124S08_ReadData	1
