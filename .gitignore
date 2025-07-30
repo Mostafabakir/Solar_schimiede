@@ -1,0 +1,39 @@
+# STM32CubeIDE and build artifacts
+Debug/
+Release/
+*.elf
+*.bin
+*.hex
+*.map
+*.list
+*.o
+*.su
+*.d
+*.cyclo
+*.log
+*.pyc
+*.pyo
+*.swp
+*.swo
+*.swn
+*.bak
+*.tmp
+*.user
+*.launch
+*.settings/
+# VSCode
+.vscode/
+# OS files
+.DS_Store
+Thumbs.db
+# Python virtualenv
+venv/
+__pycache__/
+# Misc
+*.orig
+*.old
+*.zip
+*.tar.gz
+*.7z
+*.gz
+*.rar
