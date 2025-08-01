@@ -128,37 +128,73 @@ static void handleSayHiRequest() {
 }
 
 static void handleUARTDataRequest() {
-	UartPacket packet = { 0 };
-	uint32_t msg_count = osMessageQueueGetCount(uartQueueHandle);
-	
-	// If no messages, return immediately with empty packet
-	if (msg_count == 0) {
-		Packet p = { .header = { .targetAddr = 0, .srcAddr = myAddr, .packetSize =
-		UART_WHOLEPACK_SIZE, .packetType = PACKET_TYPE_REQUEST_DATA, }, .data = { 0 } };
-		p.requestDataPack.requestDataType = RQP_TYPE_UART_DATA;
-		p.requestDataPack.data[0] = 0xff; // Indicate no data
-		p.requestDataPack.dataSize = UART_PACKET_SIZE;
-		
-		HAL_SPI_Transmit(&slave, (uint8_t*) &p, PACKET_MAX_SIZE, 100);
-		return;
-	}
-	
-	// Process message from queue
-	if (osMessageQueueGet(uartQueueHandle, (void*)&packet, NULL, 0) == osOK) {
-		Packet p = { .header = { .targetAddr = 0, .srcAddr = myAddr, .packetSize =
-		UART_WHOLEPACK_SIZE, .packetType = PACKET_TYPE_REQUEST_DATA, }, .data = { 0 } };
-		p.requestDataPack.requestDataType = RQP_TYPE_UART_DATA;
-		
-		// Copy UART data to packet
-		memcpy(p.requestDataPack.data, &packet, UART_PACKET_SIZE);
-		p.requestDataPack.dataSize = UART_PACKET_SIZE;
-		
-		// Calculate CRC for header
-		p.header.crc = p.header.packetType * 2 + p.header.targetAddr * 3 + p.header.srcAddr * 5;
-		
-		// Transmit with higher timeout to ensure completion
-		HAL_SPI_Transmit(&slave, (uint8_t*) &p, PACKET_MAX_SIZE, 200);
-	}
+    UartPacket packet = { 0 };
+    uint32_t msg_count = osMessageQueueGetCount(uartQueueHandle);
+    
+    // If no messages, return immediately with empty packet
+    if (msg_count == 0) {
+        Packet p = { 
+            .header = { 
+                .targetAddr = 0, 
+                .srcAddr = myAddr, 
+                .packetSize = PACKET_HEADER_SIZE + 3, // Minimal size for empty packet
+                .packetType = PACKET_TYPE_REQUEST_DATA 
+            }, 
+            .data = { 0 } 
+        };
+        
+        // Calculate CRC for header
+        p.header.crc = p.header.packetType * 2 + p.header.targetAddr * 3 + p.header.srcAddr * 5;
+        
+        p.requestDataPack.requestDataType = RQP_TYPE_UART_DATA;
+        p.requestDataPack.dataSize = 0; // No data
+        p.requestDataPack.data[0] = 0xff; // Indicate no data
+        
+        HAL_SPI_Transmit(&slave, (uint8_t*)&p, p.header.packetSize, 100);
+        return;
+    }
+    
+    // Process message from queue
+    if (osMessageQueueGet(uartQueueHandle, (void*)&packet, NULL, 0) == osOK) {
+        // Determine actual data length - find the stop byte (0x16) if present
+        uint16_t data_len = 0;
+        for (data_len = 0; data_len < UART_DATA_SIZE; data_len++) {
+            if (packet.data[data_len] == MBUS_STOP_BYTE && data_len > 5) {
+                // Found stop byte, include it in the packet
+                data_len++;
+                break;
+            }
+        }
+        
+        // If no stop byte found, use the entire buffer
+        if (data_len == UART_DATA_SIZE) {
+            data_len = UART_DATA_SIZE;
+        }
+        
+        // Create packet with appropriate size
+        Packet p = { 
+            .header = { 
+                .targetAddr = 0, 
+                .srcAddr = myAddr, 
+                .packetSize = PACKET_HEADER_SIZE + 2 + data_len + 1, // Header + requestType + dataSize + data + uart_id
+                .packetType = PACKET_TYPE_REQUEST_DATA 
+            }, 
+            .data = { 0 } 
+        };
+        
+        // Calculate CRC for header
+        p.header.crc = p.header.packetType * 2 + p.header.targetAddr * 3 + p.header.srcAddr * 5;
+        
+        p.requestDataPack.requestDataType = RQP_TYPE_UART_DATA;
+        p.requestDataPack.dataSize = data_len + 1; // Data + UART ID
+        
+        // Copy UART ID and data
+        p.requestDataPack.data[0] = packet.uart_id;
+        memcpy(&p.requestDataPack.data[1], packet.data, data_len);
+        
+        // Transmit with higher timeout to ensure completion
+        HAL_SPI_Transmit(&slave, (uint8_t*)&p, p.header.packetSize, 500);
+    }
 }
 
 static bool detect_downstream(Packet *response, uint8_t prevNodes) {
@@ -301,106 +337,128 @@ void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef * hspi)
 }
 
 void BusNode_RunLoop(void) {
-	uint8_t byte = 0;
-	static uint32_t last_uart_check = 0;
-	uint32_t current_tick = osKernelGetTickCount();
-	
-	// Check if there's UART data to process every 5ms
-	// This ensures we don't miss UART data while waiting for SPI commands
-	if (current_tick - last_uart_check >= 5) {
-		last_uart_check = current_tick;
-		
-		// If there's data in the UART queue, process it immediately
-		if (osMessageQueueGetCount(uartQueueHandle) > 0) {
-			handleUARTDataRequest();
-		}
-	}
+    static uint32_t last_uart_check = 0;
+    uint32_t current_tick = osKernelGetTickCount();
+    
+    // Check for UART data more frequently (every 2ms)
+    // This ensures we prioritize forwarding M-Bus data to ESP32
+    if (current_tick - last_uart_check >= 2) {
+        last_uart_check = current_tick;
+        
+        // If there's data in the UART queue, process it immediately
+        uint32_t msg_count = osMessageQueueGetCount(uartQueueHandle);
+        if (msg_count > 0) {
+            // Process all available UART messages (up to 5 at a time to avoid blocking)
+            for (uint32_t i = 0; i < msg_count && i < 5; i++) {
+                handleUARTDataRequest();
+            }
+            
+            // Return early to prioritize UART data processing
+            return;
+        }
+    }
 
-	// Non-blocking check for start byte
-	if (HAL_SPI_Receive(&slave, &byte, 1, 10) != HAL_OK || byte != PACKET_START_BYTE) {
-		return; // No valid start byte, return and try again next time
-	}
-	
-	// We received a start byte, now get the full packet
-	Packet rx = {0};
-	
-	if (HAL_SPI_Receive(&slave, (uint8_t*)&rx, sizeof(Packet), 200) != HAL_OK) {
-		return;
-	}
+    // Check for SPI commands from master
+    uint8_t byte = 0;
+    
+    // Non-blocking check for start byte
+    if (HAL_SPI_Receive(&slave, &byte, 1, 5) != HAL_OK || byte != PACKET_START_BYTE) {
+        return; // No valid start byte, return and try again next time
+    }
+    
+    // We received a start byte, now get the packet header first
+    PacketHeader header = {0};
+    
+    if (HAL_SPI_Receive(&slave, (uint8_t*)&header, PACKET_HEADER_SIZE, 50) != HAL_OK) {
+        return;
+    }
+    
+    // Validate header
+    if (header.packetSize < PACKET_HEADER_SIZE || header.packetSize > PACKET_MAX_SIZE) {
+        return;
+    }
+    
+    uint8_t crc = header.packetType * 2 + header.targetAddr * 3 + header.srcAddr * 5;
+    if (crc != header.crc) {
+        return;
+    }
+    
+    // Now receive the rest of the packet based on the size in the header
+    uint8_t data_size = header.packetSize - PACKET_HEADER_SIZE;
+    uint8_t data_buffer[PACKET_DATA_SIZE] = {0};
+    
+    if (data_size > 0) {
+        if (HAL_SPI_Receive(&slave, data_buffer, data_size, 100) != HAL_OK) {
+            return;
+        }
+    }
+    
+    // Reconstruct the full packet
+    Packet rx = {0};
+    rx.header = header;
+    memcpy(rx.data, data_buffer, data_size);
 
-	PacketHeader *h = &rx.header;
+    // Handle ASSIGN_ADDR from master (only when unassigned)
+    if (rx.header.packetType == PACKET_TYPE_ASSIGN_ADDR && myAddr == 0xFF) {
+        myAddr = rx.data[0]; // Assigned address from master
+        return;
+    }
 
-	// Validate packet
-	if (h->packetSize < PACKET_HEADER_SIZE || h->packetSize > PACKET_MAX_SIZE) {
-		return;
-	}
-	
-	uint8_t crc = h->packetType * 2 + h->targetAddr * 3 + h->srcAddr * 5;
-	if (crc != h->crc) {
-		return;
-	}
+    // Handle IDENTIFY query
+    if (rx.header.packetType == PACKET_TYPE_IDENTIFY && 
+        (rx.header.targetAddr == myAddr || rx.header.targetAddr == broadcast)) {
+        
+        Packet response = {0};
+        Packet ack = {
+            .header = {
+                .targetAddr = rx.header.srcAddr,
+                .srcAddr = myAddr,
+                .packetSize = IDENTIFY_WHOLEPACK_SIZE,
+                .packetType = PACKET_TYPE_IDENTIFY_ACK
+            }
+        };
+        
+        // Calculate CRC for header
+        ack.header.crc = ack.header.packetType * 2 + ack.header.targetAddr * 3 + ack.header.srcAddr * 5;
 
-	// Handle ASSIGN_ADDR from master (only when unassigned)
-	if (h->packetType == PACKET_TYPE_ASSIGN_ADDR && myAddr == 0xFF) {
-		myAddr = rx.data[0]; // Assigned address from master
-		return;
-	}
+        ack.identifyPack.identifiedDevices = 1;
+        ack.identifyPack.searchDepth = rx.identifyPack.searchDepth - 1;
 
-	// Handle IDENTIFY query
-	if (h->packetType == PACKET_TYPE_IDENTIFY && 
-	    (h->targetAddr == myAddr || h->targetAddr == broadcast)) {
-		
-		Packet response = {0};
-		Packet ack = {
-			.header = {
-				.targetAddr = h->srcAddr,
-				.srcAddr = myAddr,
-				.packetSize = IDENTIFY_WHOLEPACK_SIZE,
-				.packetType = PACKET_TYPE_IDENTIFY_ACK
-			}
-		};
-		
-		// Calculate CRC for header
-		ack.header.crc = ack.header.packetType * 2 + ack.header.targetAddr * 3 + ack.header.srcAddr * 5;
+        downstreamDetected = detect_downstream(&response, rx.identifyPack.searchDepth - 1);
+        if (downstreamDetected) {
+            ack.identifyPack.identifiedDevices += response.identifyPack.identifiedDevices;
+        }
 
-		ack.identifyPack.identifiedDevices = 1;
-		ack.identifyPack.searchDepth = rx.identifyPack.searchDepth - 1;
+        HAL_SPI_Transmit(&slave, (uint8_t*)&ack, IDENTIFY_WHOLEPACK_SIZE, 200);
+        return;
+    }
 
-		downstreamDetected = detect_downstream(&response, rx.identifyPack.searchDepth - 1);
-		if (downstreamDetected) {
-			ack.identifyPack.identifiedDevices += response.identifyPack.identifiedDevices;
-		}
+    // If it's for us, handle it here
+    if (rx.header.targetAddr == myAddr && myAddr != broadcast && 
+        rx.header.packetType == PACKET_TYPE_REQUEST_DATA) {
+        
+        switch (rx.requestDataPack.requestDataType) {
+        case RQP_TYPE_SAY_HI:
+            handleSayHiRequest();
+            break;
 
-		HAL_SPI_Transmit(&slave, (uint8_t*)&ack, PACKET_MAX_SIZE, 200);
-		return;
-	}
+        case RQP_TYPE_ADC_READINGS:
+            handleADCDataRequest();
+            break;
 
-	// If it's for us, handle it here
-	if (h->targetAddr == myAddr && myAddr != broadcast && 
-	    h->packetType == PACKET_TYPE_REQUEST_DATA) {
-		
-		switch (rx.requestDataPack.requestDataType) {
-		case RQP_TYPE_SAY_HI:
-			handleSayHiRequest();
-			break;
+        case RQP_TYPE_UART_DATA:
+            handleUARTDataRequest();
+            break;
 
-		case RQP_TYPE_ADC_READINGS:
-			handleADCDataRequest();
-			break;
+        case RQP_TYPE_EXT_ADC_READINGS:
+            handleExternalADCDataRequest();
+            break;
 
-		case RQP_TYPE_UART_DATA:
-			handleUARTDataRequest();
-			break;
-
-		case RQP_TYPE_EXT_ADC_READINGS:
-			handleExternalADCDataRequest();
-			break;
-
-		default:
-			break;
-		}
-		return;
-	} else if (downstreamDetected && myAddr != h->targetAddr) {
-		forward_packet(&rx);
-	}
+        default:
+            break;
+        }
+        return;
+    } else if (downstreamDetected && myAddr != rx.header.targetAddr) {
+        forward_packet(&rx);
+    }
 }

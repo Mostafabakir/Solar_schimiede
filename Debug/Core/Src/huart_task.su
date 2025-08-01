@@ -1,2 +1,6 @@
-../Core/Src/huart_task.c:28:6:HAL_UART_RxCpltCallback	24	static
-../Core/Src/huart_task.c:65:6:huartTaskEntry	88	static
+../Core/Src/huart_task.c:40:13:mbus_buffer_push	32	static
+../Core/Src/huart_task.c:55:12:mbus_find_packet	40	static
+../Core/Src/huart_task.c:98:13:mbus_buffer_pop	16	static
+../Core/Src/huart_task.c:108:12:mbus_extract_packet	32	static
+../Core/Src/huart_task.c:133:6:HAL_UART_RxCpltCallback	24	static
+../Core/Src/huart_task.c:170:6:huartTaskEntry	576	static
