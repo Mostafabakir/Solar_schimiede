@@ -1,6 +1,6 @@
 ../Core/Src/huart_task.c:40:13:mbus_buffer_push	3
 ../Core/Src/huart_task.c:55:12:mbus_find_packet	8
 ../Core/Src/huart_task.c:98:13:mbus_buffer_pop	2
-../Core/Src/huart_task.c:108:12:mbus_extract_packet	4
-../Core/Src/huart_task.c:133:6:HAL_UART_RxCpltCallback	11
-../Core/Src/huart_task.c:170:6:huartTaskEntry	6
+../Core/Src/huart_task.c:108:12:mbus_extract_packet	9
+../Core/Src/huart_task.c:194:6:HAL_UART_RxCpltCallback	11
+../Core/Src/huart_task.c:231:6:huartTaskEntry	6

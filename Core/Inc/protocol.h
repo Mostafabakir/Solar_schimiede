@@ -16,7 +16,7 @@
 
 #define PACKET_START_BYTE 0xAA
 #define PACKET_HEADER_SIZE 5
-#define PACKET_MAX_SIZE 256  // Increased to handle larger M-Bus packets
+#define PACKET_MAX_SIZE 64  // Increased but not too large to avoid SPI issues
 #define PACKET_DATA_SIZE (PACKET_MAX_SIZE - PACKET_HEADER_SIZE)
 #define MAX_BUS_NODES 10
 #define MIN_WAIT_TIME_PER_NODE 50
@@ -26,9 +26,9 @@
 #define ADC_READINGS_SIZE 24
 #define EXT_ADC_READINGS_SIZE 22
 
-// Increased to handle larger M-Bus packets
-#define UART_PACKET_SIZE    251  // 250 bytes data + 1 byte UART ID
-#define UART_DATA_SIZE      250  // M-Bus packets can be up to 250 bytes
+// Increased to handle M-Bus packets but with streaming approach
+#define UART_PACKET_SIZE    33  // 32 bytes data + 1 byte UART ID
+#define UART_DATA_SIZE      32  // Smaller chunks to avoid SPI issues
 
 // M-Bus specific definitions
 #define MBUS_START_BYTE     0x68

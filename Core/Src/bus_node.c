@@ -35,12 +35,15 @@ static uint32_t getWaitTime(uint8_t prevNodes) {
 }
 
 static void handleADCDataRequest() {
+	// Calculate actual packet size needed
+	uint16_t packet_size = PACKET_HEADER_SIZE + 2 + ADC_READINGS_SIZE;
+	
 	// Create packet with ADC data
 	Packet p = { 
 		.header = { 
 			.targetAddr = 0, 
 			.srcAddr = myAddr, 
-			.packetSize = PACKET_MAX_SIZE, 
+			.packetSize = packet_size, 
 			.packetType = PACKET_TYPE_REQUEST_DATA 
 		}, 
 		.data = { 0 } 
@@ -62,17 +65,20 @@ static void handleADCDataRequest() {
 	// Set data size
 	p.requestDataPack.dataSize = ADC_READINGS_SIZE;
 
-	// Transmit with increased timeout to ensure completion
-	HAL_SPI_Transmit(&slave, (uint8_t*)&p, PACKET_MAX_SIZE, 200);
+	// Transmit with moderate timeout
+	HAL_SPI_Transmit(&slave, (uint8_t*)&p, packet_size, 100);
 }
 
 static void handleExternalADCDataRequest() {
+	// Calculate actual packet size needed
+	uint16_t packet_size = PACKET_HEADER_SIZE + 2 + EXT_ADC_READINGS_SIZE;
+	
 	// Create packet with external ADC data
 	Packet p = { 
 		.header = { 
 			.targetAddr = 0, 
 			.srcAddr = myAddr, 
-			.packetSize = PACKET_MAX_SIZE, 
+			.packetSize = packet_size, 
 			.packetType = PACKET_TYPE_REQUEST_DATA 
 		}, 
 		.data = { 0 } 
@@ -91,17 +97,24 @@ static void handleExternalADCDataRequest() {
 	// Set data size
 	p.requestDataPack.dataSize = EXT_ADC_READINGS_SIZE;
 
-	// Transmit with increased timeout to ensure completion
-	HAL_SPI_Transmit(&slave, (uint8_t*)&p, PACKET_MAX_SIZE, 200);
+	// Transmit with moderate timeout
+	HAL_SPI_Transmit(&slave, (uint8_t*)&p, packet_size, 100);
 }
 
 static void handleSayHiRequest() {
+	// Message to send
+	const char *msg = "Solar Schmiede STM Adapter v1.0";
+	size_t dataLen = strlen(msg) + 1;
+	
+	// Calculate actual packet size needed
+	uint16_t packet_size = PACKET_HEADER_SIZE + 2 + dataLen;
+	
 	// Create packet for "Say Hi" response
 	Packet hi = { 
 		.header = { 
 			.targetAddr = 0, 
 			.srcAddr = myAddr, 
-			.packetSize = PACKET_MAX_SIZE, 
+			.packetSize = packet_size, 
 			.packetType = PACKET_TYPE_REQUEST_DATA 
 		}, 
 		.data = { 0 } 
@@ -112,10 +125,6 @@ static void handleSayHiRequest() {
 	
 	// Set request type
 	hi.requestDataPack.requestDataType = RQP_TYPE_SAY_HI;
-
-	// Message to send
-	const char *msg = "Solar Schmiede STM Adapter v1.0";
-	size_t dataLen = strlen(msg) + 1;
 	
 	// Copy message to packet
 	memcpy(hi.requestDataPack.data, msg, dataLen);
@@ -123,8 +132,8 @@ static void handleSayHiRequest() {
 	// Set data size
 	hi.requestDataPack.dataSize = dataLen;
 
-	// Transmit with increased timeout to ensure completion
-	HAL_SPI_Transmit(&slave, (uint8_t*)&hi, PACKET_MAX_SIZE, 200);
+	// Transmit with moderate timeout
+	HAL_SPI_Transmit(&slave, (uint8_t*)&hi, packet_size, 100);
 }
 
 static void handleUARTDataRequest() {
@@ -150,33 +159,43 @@ static void handleUARTDataRequest() {
         p.requestDataPack.dataSize = 0; // No data
         p.requestDataPack.data[0] = 0xff; // Indicate no data
         
-        HAL_SPI_Transmit(&slave, (uint8_t*)&p, p.header.packetSize, 100);
+        HAL_SPI_Transmit(&slave, (uint8_t*)&p, p.header.packetSize, 50);
         return;
     }
     
     // Process message from queue
     if (osMessageQueueGet(uartQueueHandle, (void*)&packet, NULL, 0) == osOK) {
-        // Determine actual data length - find the stop byte (0x16) if present
+        // Get actual data length
         uint16_t data_len = 0;
+        uint8_t is_last_chunk = 0;
+        
+        // Check for end of packet marker (0x16)
         for (data_len = 0; data_len < UART_DATA_SIZE; data_len++) {
             if (packet.data[data_len] == MBUS_STOP_BYTE && data_len > 5) {
                 // Found stop byte, include it in the packet
                 data_len++;
+                is_last_chunk = 1;
                 break;
             }
         }
         
         // If no stop byte found, use the entire buffer
-        if (data_len == UART_DATA_SIZE) {
+        if (data_len == 0) {
             data_len = UART_DATA_SIZE;
         }
         
-        // Create packet with appropriate size
+        // Create packet with appropriate size (don't exceed PACKET_MAX_SIZE)
+        uint16_t packet_size = PACKET_HEADER_SIZE + 3 + data_len; // Header + requestType + dataSize + flags + data
+        if (packet_size > PACKET_MAX_SIZE) {
+            packet_size = PACKET_MAX_SIZE;
+            data_len = PACKET_MAX_SIZE - PACKET_HEADER_SIZE - 3;
+        }
+        
         Packet p = { 
             .header = { 
                 .targetAddr = 0, 
                 .srcAddr = myAddr, 
-                .packetSize = PACKET_HEADER_SIZE + 2 + data_len + 1, // Header + requestType + dataSize + data + uart_id
+                .packetSize = packet_size,
                 .packetType = PACKET_TYPE_REQUEST_DATA 
             }, 
             .data = { 0 } 
@@ -186,14 +205,18 @@ static void handleUARTDataRequest() {
         p.header.crc = p.header.packetType * 2 + p.header.targetAddr * 3 + p.header.srcAddr * 5;
         
         p.requestDataPack.requestDataType = RQP_TYPE_UART_DATA;
-        p.requestDataPack.dataSize = data_len + 1; // Data + UART ID
+        p.requestDataPack.dataSize = data_len + 2; // Data + UART ID + flags
         
-        // Copy UART ID and data
+        // Copy UART ID, flags, and data
         p.requestDataPack.data[0] = packet.uart_id;
-        memcpy(&p.requestDataPack.data[1], packet.data, data_len);
+        p.requestDataPack.data[1] = is_last_chunk; // Flag to indicate if this is the last chunk
+        memcpy(&p.requestDataPack.data[2], packet.data, data_len);
         
-        // Transmit with higher timeout to ensure completion
-        HAL_SPI_Transmit(&slave, (uint8_t*)&p, p.header.packetSize, 500);
+        // Transmit with moderate timeout
+        HAL_SPI_Transmit(&slave, (uint8_t*)&p, p.header.packetSize, 100);
+        
+        // Small delay to allow ESP32 to process the data
+        osDelay(1);
     }
 }
 
@@ -222,16 +245,16 @@ static bool detect_downstream(Packet *response, uint8_t prevNodes) {
 
 	// First transmission - send start byte and identification packet
 	SPI2_NSS_LOW();
-	HAL_Delay(2); // Slightly longer delay to ensure stable signal
+	HAL_Delay(1); // Shorter delay to avoid timing issues
 	
 	// Send start byte
-	if (HAL_SPI_Transmit(&master, &byte, 1, 100) != HAL_OK) {
+	if (HAL_SPI_Transmit(&master, &byte, 1, 50) != HAL_OK) {
 		SPI2_NSS_HIGH();
 		return false; // Abort if transmission fails
 	}
 	
-	// Send identification packet
-	if (HAL_SPI_Transmit(&master, (uint8_t*)&ident, PACKET_MAX_SIZE, 200) != HAL_OK) {
+	// Send identification packet (use actual size, not maximum)
+	if (HAL_SPI_Transmit(&master, (uint8_t*)&ident, IDENTIFY_WHOLEPACK_SIZE, 100) != HAL_OK) {
 		SPI2_NSS_HIGH();
 		return false; // Abort if transmission fails
 	}
@@ -240,26 +263,43 @@ static bool detect_downstream(Packet *response, uint8_t prevNodes) {
 	SPI2_NSS_HIGH();
 
 	// Wait for downstream nodes to process the packet
-	// Use a longer wait time for more reliability
-	uint32_t wait_time = getWaitTime(prevNodes) + 50;
+	uint32_t wait_time = getWaitTime(prevNodes) + 20;
 	osDelay(wait_time);
 	
 	// Second transmission - receive response
 	SPI2_NSS_LOW();
-	HAL_Delay(2); // Slightly longer delay to ensure stable signal
+	HAL_Delay(1);
 	
 	// Clear response buffer
 	memset(response, 0, sizeof(Packet));
 	
-	// Receive response with longer timeout
-	HAL_StatusTypeDef status = HAL_SPI_Receive(&master, (uint8_t*)response, 
-	                                           PACKET_MAX_SIZE, wait_time * 2);
+	// First receive header to determine actual packet size
+	if (HAL_SPI_Receive(&master, (uint8_t*)response, PACKET_HEADER_SIZE, 100) != HAL_OK) {
+		SPI2_NSS_HIGH();
+		return false;
+	}
+	
+	// Validate header
+	if (response->header.packetSize < PACKET_HEADER_SIZE || 
+	    response->header.packetSize > PACKET_MAX_SIZE) {
+		SPI2_NSS_HIGH();
+		return false;
+	}
+	
+	// Receive rest of packet if needed
+	if (response->header.packetSize > PACKET_HEADER_SIZE) {
+		uint16_t data_size = response->header.packetSize - PACKET_HEADER_SIZE;
+		if (HAL_SPI_Receive(&master, (uint8_t*)&response->data, data_size, 100) != HAL_OK) {
+			SPI2_NSS_HIGH();
+			return false;
+		}
+	}
 	
 	// End second transmission
 	SPI2_NSS_HIGH();
 
 	// Check if we received a valid acknowledgment
-	if (status == HAL_OK && response->header.packetType == PACKET_TYPE_IDENTIFY_ACK) {
+	if (response->header.packetType == PACKET_TYPE_IDENTIFY_ACK) {
 		// Validate CRC
 		uint8_t crc = response->header.packetType * 2 + 
 		              response->header.targetAddr * 3 + 
@@ -288,16 +328,21 @@ static void forward_packet(const Packet *pkt) {
 	
 	// First transmission - send start byte and packet
 	SPI2_NSS_LOW();
-	HAL_Delay(2); // Slightly longer delay to ensure stable signal
+	HAL_Delay(1); // Shorter delay to avoid timing issues
 	
 	// Send start byte
-	if (HAL_SPI_Transmit(&master, &byte, 1, 100) != HAL_OK) {
+	if (HAL_SPI_Transmit(&master, &byte, 1, 50) != HAL_OK) {
 		SPI2_NSS_HIGH();
 		return; // Abort if transmission fails
 	}
 	
-	// Send packet
-	if (HAL_SPI_Transmit(&master, (uint8_t*)pkt, PACKET_MAX_SIZE, 200) != HAL_OK) {
+	// Send packet (use actual packet size, not maximum)
+	uint16_t packet_size = pkt->header.packetSize;
+	if (packet_size < PACKET_HEADER_SIZE || packet_size > PACKET_MAX_SIZE) {
+		packet_size = PACKET_MAX_SIZE; // Fallback to max size if invalid
+	}
+	
+	if (HAL_SPI_Transmit(&master, (uint8_t*)pkt, packet_size, 100) != HAL_OK) {
 		SPI2_NSS_HIGH();
 		return; // Abort if transmission fails
 	}
@@ -306,14 +351,33 @@ static void forward_packet(const Packet *pkt) {
 	SPI2_NSS_HIGH();
 	
 	// Small delay between transmissions
-	HAL_Delay(5);
+	HAL_Delay(2);
 	
 	// Second transmission - receive response
 	SPI2_NSS_LOW();
-	HAL_Delay(2); // Slightly longer delay to ensure stable signal
+	HAL_Delay(1);
 	
-	// Receive response with longer timeout
-	HAL_SPI_Receive(&master, (uint8_t*)&response, PACKET_MAX_SIZE, 300);
+	// First receive header to determine actual packet size
+	if (HAL_SPI_Receive(&master, (uint8_t*)&response, PACKET_HEADER_SIZE, 100) != HAL_OK) {
+		SPI2_NSS_HIGH();
+		return;
+	}
+	
+	// Validate header
+	if (response.header.packetSize < PACKET_HEADER_SIZE || 
+	    response.header.packetSize > PACKET_MAX_SIZE) {
+		SPI2_NSS_HIGH();
+		return;
+	}
+	
+	// Receive rest of packet if needed
+	if (response.header.packetSize > PACKET_HEADER_SIZE) {
+		uint16_t data_size = response.header.packetSize - PACKET_HEADER_SIZE;
+		if (HAL_SPI_Receive(&master, (uint8_t*)&response.data, data_size, 100) != HAL_OK) {
+			SPI2_NSS_HIGH();
+			return;
+		}
+	}
 	
 	// End second transmission
 	SPI2_NSS_HIGH();
@@ -323,8 +387,8 @@ static void forward_packet(const Packet *pkt) {
 	                      response.header.targetAddr * 3 + 
 	                      response.header.srcAddr * 5;
 	
-	// Forward response back to the slave
-	HAL_SPI_Transmit(&slave, (uint8_t*)&response, PACKET_MAX_SIZE, 300);
+	// Forward response back to the slave (use actual packet size)
+	HAL_SPI_Transmit(&slave, (uint8_t*)&response, response.header.packetSize, 100);
 }
 
 void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef * hspi)

@@ -106,6 +106,51 @@ static void mbus_buffer_pop(MbusCircularBuffer *buf, uint16_t len) {
 
 // Extract a complete packet from the buffer
 static int mbus_extract_packet(MbusCircularBuffer *buf, uint8_t *packet, uint16_t max_len) {
+    static uint16_t ongoing_packet_idx[UART_COUNT] = {0};
+    static uint16_t ongoing_packet_len[UART_COUNT] = {0};
+    static uint16_t ongoing_packet_pos[UART_COUNT] = {0};
+    static uint8_t ongoing_uart_id[UART_COUNT] = {0};
+    
+    // Get UART ID from buffer pointer (hacky but works)
+    uint8_t uart_id = 0;
+    for (uart_id = 0; uart_id < UART_COUNT; uart_id++) {
+        if (buf == &mbus_buffers[uart_id]) {
+            break;
+        }
+    }
+    
+    // If we're in the middle of streaming a packet
+    if (ongoing_packet_len[uart_id] > 0) {
+        // Calculate how much data we can send in this chunk
+        uint16_t remaining = ongoing_packet_len[uart_id] - ongoing_packet_pos[uart_id];
+        uint16_t chunk_size = (remaining > max_len) ? max_len : remaining;
+        
+        // Copy chunk to output buffer
+        for (uint16_t i = 0; i < chunk_size; i++) {
+            uint16_t idx = (ongoing_packet_idx[uart_id] + ongoing_packet_pos[uart_id] + i) % MBUS_BUFFER_SIZE;
+            packet[i] = buf->buffer[idx];
+        }
+        
+        // Update position
+        ongoing_packet_pos[uart_id] += chunk_size;
+        
+        // If we've sent the entire packet, clean up
+        if (ongoing_packet_pos[uart_id] >= ongoing_packet_len[uart_id]) {
+            // Remove the packet from the buffer
+            mbus_buffer_pop(buf, ongoing_packet_idx[uart_id] - buf->tail + ongoing_packet_len[uart_id]);
+            
+            // Reset tracking variables
+            ongoing_packet_len[uart_id] = 0;
+            ongoing_packet_pos[uart_id] = 0;
+        }
+        
+        // Store UART ID for reference
+        ongoing_uart_id[uart_id] = uart_id + 1;
+        
+        return chunk_size;
+    }
+    
+    // Look for a new packet
     uint16_t start_idx = 0;
     uint16_t packet_len = 0;
     
@@ -113,21 +158,37 @@ static int mbus_extract_packet(MbusCircularBuffer *buf, uint8_t *packet, uint16_
         return 0;
     }
     
-    // Check if packet fits in the output buffer
-    if (packet_len > max_len) {
-        return 0;
-    }
+    // Start streaming this packet
+    ongoing_packet_idx[uart_id] = start_idx;
+    ongoing_packet_len[uart_id] = packet_len;
+    ongoing_packet_pos[uart_id] = 0;
     
-    // Copy packet to output buffer
-    for (uint16_t i = 0; i < packet_len; i++) {
+    // Calculate how much data we can send in this first chunk
+    uint16_t chunk_size = (packet_len > max_len) ? max_len : packet_len;
+    
+    // Copy chunk to output buffer
+    for (uint16_t i = 0; i < chunk_size; i++) {
         uint16_t idx = (start_idx + i) % MBUS_BUFFER_SIZE;
         packet[i] = buf->buffer[idx];
     }
     
-    // Remove the packet from the buffer
-    mbus_buffer_pop(buf, start_idx - buf->tail + packet_len);
+    // Update position
+    ongoing_packet_pos[uart_id] += chunk_size;
     
-    return packet_len;
+    // If we've sent the entire packet, clean up
+    if (ongoing_packet_pos[uart_id] >= packet_len) {
+        // Remove the packet from the buffer
+        mbus_buffer_pop(buf, start_idx - buf->tail + packet_len);
+        
+        // Reset tracking variables
+        ongoing_packet_len[uart_id] = 0;
+        ongoing_packet_pos[uart_id] = 0;
+    }
+    
+    // Store UART ID for reference
+    ongoing_uart_id[uart_id] = uart_id + 1;
+    
+    return chunk_size;
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
