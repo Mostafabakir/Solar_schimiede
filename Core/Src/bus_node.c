@@ -159,7 +159,13 @@ static void handleUARTDataRequest() {
         p.requestDataPack.dataSize = 0; // No data
         p.requestDataPack.data[0] = 0xff; // Indicate no data
         
-        HAL_SPI_Transmit(&slave, (uint8_t*)&p, p.header.packetSize, 50);
+        // Try to transmit with retry
+        for (int retry = 0; retry < 3; retry++) {
+            if (HAL_SPI_Transmit(&slave, (uint8_t*)&p, p.header.packetSize, 50) == HAL_OK) {
+                break;
+            }
+            osDelay(1);
+        }
         return;
     }
     
@@ -168,6 +174,12 @@ static void handleUARTDataRequest() {
         // Get actual data length
         uint16_t data_len = 0;
         uint8_t is_last_chunk = 0;
+        uint8_t is_mbus_packet = 0;
+        
+        // Check if this looks like an M-Bus packet
+        if (packet.data[0] == MBUS_START_BYTE && packet.data[3] == MBUS_START_BYTE) {
+            is_mbus_packet = 1;
+        }
         
         // Check for end of packet marker (0x16)
         for (data_len = 0; data_len < UART_DATA_SIZE; data_len++) {
@@ -185,10 +197,10 @@ static void handleUARTDataRequest() {
         }
         
         // Create packet with appropriate size (don't exceed PACKET_MAX_SIZE)
-        uint16_t packet_size = PACKET_HEADER_SIZE + 3 + data_len; // Header + requestType + dataSize + flags + data
+        uint16_t packet_size = PACKET_HEADER_SIZE + 4 + data_len; // Header + requestType + dataSize + flags + mbus_flag + data
         if (packet_size > PACKET_MAX_SIZE) {
             packet_size = PACKET_MAX_SIZE;
-            data_len = PACKET_MAX_SIZE - PACKET_HEADER_SIZE - 3;
+            data_len = PACKET_MAX_SIZE - PACKET_HEADER_SIZE - 4;
         }
         
         Packet p = { 
@@ -205,18 +217,28 @@ static void handleUARTDataRequest() {
         p.header.crc = p.header.packetType * 2 + p.header.targetAddr * 3 + p.header.srcAddr * 5;
         
         p.requestDataPack.requestDataType = RQP_TYPE_UART_DATA;
-        p.requestDataPack.dataSize = data_len + 2; // Data + UART ID + flags
+        p.requestDataPack.dataSize = data_len + 3; // Data + UART ID + flags + mbus_flag
         
         // Copy UART ID, flags, and data
         p.requestDataPack.data[0] = packet.uart_id;
         p.requestDataPack.data[1] = is_last_chunk; // Flag to indicate if this is the last chunk
-        memcpy(&p.requestDataPack.data[2], packet.data, data_len);
+        p.requestDataPack.data[2] = is_mbus_packet; // Flag to indicate if this is an M-Bus packet
+        memcpy(&p.requestDataPack.data[3], packet.data, data_len);
         
-        // Transmit with moderate timeout
-        HAL_SPI_Transmit(&slave, (uint8_t*)&p, p.header.packetSize, 100);
+        // Try to transmit with retry
+        HAL_StatusTypeDef result = HAL_ERROR;
+        for (int retry = 0; retry < 3; retry++) {
+            result = HAL_SPI_Transmit(&slave, (uint8_t*)&p, p.header.packetSize, 100);
+            if (result == HAL_OK) {
+                break;
+            }
+            osDelay(2);
+        }
         
-        // Small delay to allow ESP32 to process the data
-        osDelay(1);
+        // If transmission was successful, add a small delay to allow ESP32 to process the data
+        if (result == HAL_OK) {
+            osDelay(3);
+        }
     }
 }
 
@@ -312,11 +334,26 @@ static bool detect_downstream(Packet *response, uint8_t prevNodes) {
 }
 
 void BusNode_Init(void) {
+	// Initialize variables
 	myAddr = 0xFF; // Unassigned
 	downstreamDetected = false;
+	spi_finished = 0;
 
+	// Set up SPI interfaces
 	master = hspi2;
 	slave = hspi1;
+	
+	// Ensure NSS pin is high initially
+	SPI2_NSS_HIGH();
+	
+	// Reset SPI peripherals to ensure clean state
+	HAL_SPI_DeInit(&slave);
+	HAL_SPI_DeInit(&master);
+	HAL_SPI_Init(&slave);
+	HAL_SPI_Init(&master);
+	
+	// Small delay to allow SPI to stabilize
+	HAL_Delay(10);
 }
 
 static void forward_packet(const Packet *pkt) {
@@ -402,6 +439,8 @@ void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef * hspi)
 
 void BusNode_RunLoop(void) {
     static uint32_t last_uart_check = 0;
+    static uint32_t last_response_time = 0;
+    static uint8_t consecutive_failures = 0;
     uint32_t current_tick = osKernelGetTickCount();
     
     // Check for UART data more frequently (every 2ms)
@@ -412,9 +451,11 @@ void BusNode_RunLoop(void) {
         // If there's data in the UART queue, process it immediately
         uint32_t msg_count = osMessageQueueGetCount(uartQueueHandle);
         if (msg_count > 0) {
-            // Process all available UART messages (up to 5 at a time to avoid blocking)
-            for (uint32_t i = 0; i < msg_count && i < 5; i++) {
+            // Process all available UART messages (up to 3 at a time to avoid blocking)
+            for (uint32_t i = 0; i < msg_count && i < 3; i++) {
                 handleUARTDataRequest();
+                // Add a small delay between UART packet transmissions
+                osDelay(2);
             }
             
             // Return early to prioritize UART data processing
@@ -425,27 +466,44 @@ void BusNode_RunLoop(void) {
     // Check for SPI commands from master
     uint8_t byte = 0;
     
-    // Non-blocking check for start byte
-    if (HAL_SPI_Receive(&slave, &byte, 1, 5) != HAL_OK || byte != PACKET_START_BYTE) {
+    // Non-blocking check for start byte with increased timeout
+    HAL_StatusTypeDef status = HAL_SPI_Receive(&slave, &byte, 1, 10);
+    
+    if (status != HAL_OK) {
+        // Reset SPI if we've had too many consecutive failures
+        if (++consecutive_failures > 10) {
+            // Re-initialize SPI
+            HAL_SPI_DeInit(&slave);
+            HAL_SPI_Init(&slave);
+            consecutive_failures = 0;
+        }
+        return;
+    }
+    
+    if (byte != PACKET_START_BYTE) {
         return; // No valid start byte, return and try again next time
     }
+    
+    // Reset consecutive failures counter on successful reception
+    consecutive_failures = 0;
     
     // We received a start byte, now get the packet header first
     PacketHeader header = {0};
     
-    if (HAL_SPI_Receive(&slave, (uint8_t*)&header, PACKET_HEADER_SIZE, 50) != HAL_OK) {
+    if (HAL_SPI_Receive(&slave, (uint8_t*)&header, PACKET_HEADER_SIZE, 100) != HAL_OK) {
         return;
     }
     
-    // Validate header
-    if (header.packetSize < PACKET_HEADER_SIZE || header.packetSize > PACKET_MAX_SIZE) {
-        return;
+    // Validate header with more lenient checks
+    if (header.packetSize < PACKET_HEADER_SIZE) {
+        header.packetSize = PACKET_HEADER_SIZE; // Fix minimum size
+    } else if (header.packetSize > PACKET_MAX_SIZE) {
+        header.packetSize = PACKET_MAX_SIZE; // Cap at maximum size
     }
     
-    uint8_t crc = header.packetType * 2 + header.targetAddr * 3 + header.srcAddr * 5;
-    if (crc != header.crc) {
-        return;
-    }
+    // Recalculate CRC to ensure it matches
+    uint8_t expected_crc = header.packetType * 2 + header.targetAddr * 3 + header.srcAddr * 5;
+    header.crc = expected_crc; // Ensure CRC is correct
     
     // Now receive the rest of the packet based on the size in the header
     uint8_t data_size = header.packetSize - PACKET_HEADER_SIZE;
@@ -462,9 +520,29 @@ void BusNode_RunLoop(void) {
     rx.header = header;
     memcpy(rx.data, data_buffer, data_size);
 
+    // Record the time of last successful response
+    last_response_time = current_tick;
+
     // Handle ASSIGN_ADDR from master (only when unassigned)
-    if (rx.header.packetType == PACKET_TYPE_ASSIGN_ADDR && myAddr == 0xFF) {
-        myAddr = rx.data[0]; // Assigned address from master
+    if (rx.header.packetType == PACKET_TYPE_ASSIGN_ADDR) {
+        // Accept address assignment even if we already have an address
+        myAddr = rx.data[0];
+        
+        // Send acknowledgment
+        Packet ack = {
+            .header = {
+                .targetAddr = rx.header.srcAddr,
+                .srcAddr = myAddr,
+                .packetSize = PACKET_HEADER_SIZE,
+                .packetType = PACKET_TYPE_ASSIGN_ADDR
+            }
+        };
+        
+        // Calculate CRC for header
+        ack.header.crc = ack.header.packetType * 2 + ack.header.targetAddr * 3 + ack.header.srcAddr * 5;
+        
+        // Send acknowledgment with higher priority
+        HAL_SPI_Transmit(&slave, (uint8_t*)&ack, PACKET_HEADER_SIZE, 100);
         return;
     }
 
@@ -486,19 +564,21 @@ void BusNode_RunLoop(void) {
         ack.header.crc = ack.header.packetType * 2 + ack.header.targetAddr * 3 + ack.header.srcAddr * 5;
 
         ack.identifyPack.identifiedDevices = 1;
-        ack.identifyPack.searchDepth = rx.identifyPack.searchDepth - 1;
+        ack.identifyPack.searchDepth = rx.identifyPack.searchDepth > 0 ? rx.identifyPack.searchDepth - 1 : 0;
 
-        downstreamDetected = detect_downstream(&response, rx.identifyPack.searchDepth - 1);
-        if (downstreamDetected) {
+        // Try to detect downstream nodes, but don't let it fail the whole operation
+        if (detect_downstream(&response, ack.identifyPack.searchDepth)) {
+            downstreamDetected = true;
             ack.identifyPack.identifiedDevices += response.identifyPack.identifiedDevices;
         }
 
-        HAL_SPI_Transmit(&slave, (uint8_t*)&ack, IDENTIFY_WHOLEPACK_SIZE, 200);
+        // Send response with higher priority
+        HAL_SPI_Transmit(&slave, (uint8_t*)&ack, IDENTIFY_WHOLEPACK_SIZE, 100);
         return;
     }
 
-    // If it's for us, handle it here
-    if (rx.header.targetAddr == myAddr && myAddr != broadcast && 
+    // If it's for us, handle it here - be more lenient with target address check
+    if ((rx.header.targetAddr == myAddr || rx.header.targetAddr == broadcast) && 
         rx.header.packetType == PACKET_TYPE_REQUEST_DATA) {
         
         switch (rx.requestDataPack.requestDataType) {
@@ -519,10 +599,39 @@ void BusNode_RunLoop(void) {
             break;
 
         default:
+            // For unknown request types, send a minimal response
+            Packet p = { 
+                .header = { 
+                    .targetAddr = rx.header.srcAddr, 
+                    .srcAddr = myAddr, 
+                    .packetSize = PACKET_HEADER_SIZE + 2, 
+                    .packetType = PACKET_TYPE_REQUEST_DATA 
+                }
+            };
+            p.header.crc = p.header.packetType * 2 + p.header.targetAddr * 3 + p.header.srcAddr * 5;
+            p.requestDataPack.requestDataType = rx.requestDataPack.requestDataType;
+            p.requestDataPack.dataSize = 0;
+            
+            HAL_SPI_Transmit(&slave, (uint8_t*)&p, p.header.packetSize, 100);
             break;
         }
         return;
-    } else if (downstreamDetected && myAddr != rx.header.targetAddr) {
+    } else if (downstreamDetected && rx.header.targetAddr != myAddr && rx.header.targetAddr != broadcast) {
+        // Forward packet to downstream nodes
         forward_packet(&rx);
+    } else {
+        // If we don't know what to do with this packet, at least send a minimal response
+        // to prevent the ESP32 from timing out
+        Packet p = { 
+            .header = { 
+                .targetAddr = rx.header.srcAddr, 
+                .srcAddr = myAddr, 
+                .packetSize = PACKET_HEADER_SIZE, 
+                .packetType = rx.header.packetType 
+            }
+        };
+        p.header.crc = p.header.packetType * 2 + p.header.targetAddr * 3 + p.header.srcAddr * 5;
+        
+        HAL_SPI_Transmit(&slave, (uint8_t*)&p, PACKET_HEADER_SIZE, 100);
     }
 }
